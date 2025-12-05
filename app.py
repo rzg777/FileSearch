@@ -403,7 +403,7 @@ with st.sidebar:
         value=st.session_state.api_key,
     )
 
-    if api_key and api_key != st.session_state.api_key:
+    if api_key and (api_key != st.session_state.api_key or not st.session_state.api_key_valid):
         with st.spinner("Validating API key..."):
             if initialize_client(api_key):
                 st.success("✅ Connected to Gemini API")
@@ -411,6 +411,7 @@ with st.sidebar:
         st.info("👆 Enter your API key to get started")
         st.session_state.api_key_valid = False
         st.session_state.client = None
+        st.session_state.api_key = ""
     elif st.session_state.api_key_valid and st.session_state.client:
         st.success("✅ Connected to Gemini API")
     
