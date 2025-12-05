@@ -8,10 +8,13 @@ This application allows users to:
 3. Test retrieval quality in a real-time chat playground
 """
 
-import streamlit as st
-import pandas as pd
+import io
+import logging
 import time
-from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+import pandas as pd
+import streamlit as st
 
 # Google GenAI SDK imports
 # google.genai is the main client library for Gemini API
@@ -101,18 +104,20 @@ st.markdown("""
 # =============================================================================
 def init_session_state():
     """Initialize all session state variables."""
-    if "client" not in st.session_state:
-        st.session_state.client = None
-    if "selected_store" not in st.session_state:
-        st.session_state.selected_store = None
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-    if "metadata_rows" not in st.session_state:
-        st.session_state.metadata_rows = [{"key": "", "value": ""}]
-    if "stores_list" not in st.session_state:
-        st.session_state.stores_list = []
-    if "api_key_valid" not in st.session_state:
-        st.session_state.api_key_valid = False
+    defaults = {
+        "client": None,
+        "selected_store": None,
+        "chat_history": [],
+        "metadata_rows": [{"key": "", "value": ""}],
+        "stores_list": [],
+        "api_key_valid": False,
+        "api_key": "",
+    }
+
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
 
 init_session_state()
 
@@ -121,127 +126,114 @@ init_session_state()
 # =============================================================================
 
 def initialize_client(api_key: str) -> bool:
+    """Create and validate a Google GenAI client for the current session.
+
+    The function performs a lightweight model list call to validate the key but
+    keeps the call bounded so the UI does not freeze when a key is invalid or
+    network connectivity is slow.
     """
-    Initialize the Google GenAI client with the provided API key.
-    
-    Uses genai.Client() to create a new client instance.
-    The client is stored in session state to persist across reruns.
-    
-    Args:
-        api_key: The Gemini API key
-        
-    Returns:
-        bool: True if initialization successful, False otherwise
-    """
+
+    if not api_key:
+        st.session_state.client = None
+        st.session_state.api_key_valid = False
+        return False
+
     try:
-        # Create the GenAI client with the API key
         client = genai.Client(api_key=api_key)
-        
-        # Test the client by listing models (lightweight operation)
-        # This validates the API key is correct
-        list(client.models.list())
-        
+
+        # Use a short, bounded validation call so the UI stays responsive.
+        models_iterator = client.models.list(page_size=1)
+        next(models_iterator, None)
+
         st.session_state.client = client
         st.session_state.api_key_valid = True
+        st.session_state.api_key = api_key
         return True
     except Exception as e:
         st.session_state.client = None
         st.session_state.api_key_valid = False
+        st.session_state.api_key = ""
         error_msg = str(e).lower()
         if "invalid" in error_msg or "api key" in error_msg:
             st.error("❌ Invalid API Key. Please check your key and try again.")
         elif "quota" in error_msg:
             st.error("❌ Quota Exceeded. Please check your API usage limits.")
         else:
-            st.error(f"❌ Error initializing client: {e}")
+            st.error("❌ Unable to connect with the provided API key. Please try again.")
+        logging.warning("Client initialization failed: %s", e)
         return False
 
 
-def list_stores():
-    """
-    List all File Search Stores for the current user.
-    
-    Uses client.file_search_stores.list() to retrieve all stores.
-    Returns a list of store objects with name and display_name.
-    """
+def require_client() -> Optional[genai.Client]:
+    """Return the configured client or show a warning and stop early."""
+
+    client: Optional[genai.Client] = st.session_state.get("client")
+    if not client or not st.session_state.get("api_key_valid"):
+        st.warning("⚠️ Please enter a valid API key in the sidebar to continue.")
+        return None
+
+    return client
+
+
+def list_stores() -> List[types.FileSearchStore]:
+    """List all File Search Stores for the current user."""
+
+    client = require_client()
+    if not client:
+        return []
+
     try:
-        client = st.session_state.client
-        # List all file search stores
         stores = list(client.file_search_stores.list())
         st.session_state.stores_list = stores
         return stores
     except Exception as e:
-        st.error(f"❌ Error listing stores: {e}")
+        logging.exception("Failed to list stores")
+        st.error("❌ Error listing stores. Please try again.")
         return []
 
 
 def create_store(display_name: str):
-    """
-    Create a new File Search Store.
-    
-    Uses client.file_search_stores.create() with the display_name parameter.
-    
-    Args:
-        display_name: Human-readable name for the store
-        
-    Returns:
-        The created store object or None if failed
-    """
+    """Create a new File Search Store."""
+
+    client = require_client()
+    if not client:
+        return None
+
     try:
-        client = st.session_state.client
-        # Create a new file search store with the given display name
-        # Updated to use config dict as per new SDK version
         store = client.file_search_stores.create(
             config={'display_name': display_name}
         )
         return store
     except Exception as e:
-        st.error(f"❌ Error creating store: {e}")
+        logging.exception("Failed to create store")
+        st.error("❌ Error creating store. Please try again.")
         return None
 
 
-def delete_store(store_name: str):
-    """
-    Delete a File Search Store.
-    
-    Uses client.file_search_stores.delete() with the store resource name.
-    
-    Args:
-        store_name: The resource name of the store (e.g., "fileSearchStores/abc123")
-    """
+def delete_store(store_name: str) -> bool:
+    """Delete a File Search Store."""
+
+    client = require_client()
+    if not client:
+        return False
+
     try:
-        client = st.session_state.client
-        # Added config={'force': True} to ensure deletion works
         client.file_search_stores.delete(name=store_name, config={'force': True})
         return True
     except Exception as e:
-        st.error(f"❌ Error deleting store: {e}")
+        logging.exception("Failed to delete store")
+        st.error("❌ Error deleting store. Please try again.")
         return False
 
 
 def list_files(store_name: str):
-    """
-    List all files in a File Search Store.
+    """List all files in a File Search Store."""
 
-    Uses client.file_search_stores.files.list() to get files in a store.
-
-    Args:
-        store_name: The resource name of the store
-
-    Returns:
-        List of file objects if successful, or None if retrieval failed.
-    """
-    client = st.session_state.get("client")
-    if not client:
-        st.warning("⚠️ Please configure an API key to load files.")
-        return None
-
-    if not store_name:
-        st.warning("⚠️ Please select a store to view its files.")
+    client = require_client()
+    if not client or not store_name:
         return None
 
     try:
-        # List files scoped to the specific File Search Store
         files = list(
             client.file_search_stores.files.list(
                 file_search_store=store_name
@@ -249,48 +241,44 @@ def list_files(store_name: str):
         )
         return files
     except Exception as e:
-        st.error(f"❌ Error listing files: {e}")
+        logging.exception("Failed to list files")
+        st.error("❌ Error listing files. Please try again.")
         return None
 
 
-def upload_file_to_store(store_name: str, uploaded_file, metadata: dict, chunking_config: dict = None):
-    """
-    Upload a file to a File Search Store with custom metadata and chunking config.
-    
-    Process:
-    1. Upload the file using client.files.upload()
-    2. Import it to the store using file_search_stores.import_file()
-    
-    Args:
-        store_name: The resource name of the store
-        uploaded_file: The Streamlit UploadedFile object
-        metadata: Dictionary of custom metadata key-value pairs
-        chunking_config: Optional dictionary for chunking configuration
-        
-    Returns:
-        The file object or None if failed
-    """
+def upload_file_to_store(
+    store_name: str,
+    uploaded_file,
+    metadata: Dict[str, str],
+    chunking_config: Optional[Dict] = None,
+) -> Optional[types.File]:
+    """Upload and import a file to a File Search Store with clear progress updates."""
+
+    client = require_client()
+    if not client:
+        return None
+
+    progress = st.empty()
     try:
-        client = st.session_state.client
-        
-        # First, upload the file to Gemini Files API
-        # The file is uploaded as bytes with the original filename
-        # Using config={'display_name': ...} as per SDK requirements
-        # Added mime_type argument to fix "Unknown mime type" error
+        progress.info("⬆️ Uploading file to Gemini Files API...")
+
+        # Reset pointer and build a BytesIO object with a stable name for the SDK.
+        uploaded_file.seek(0)
+        file_bytes = uploaded_file.read()
+        file_buffer = io.BytesIO(file_bytes)
+        file_buffer.name = uploaded_file.name
+
         file = client.files.upload(
-            file=uploaded_file,
-            config={'display_name': uploaded_file.name, 'mime_type': uploaded_file.type}
+            file=file_buffer,
+            config={'display_name': uploaded_file.name, 'mime_type': uploaded_file.type},
         )
-        
-        # Prepare import config
-        import_config = {}
+
+        progress.info("📦 Importing file into the selected store...")
+
+        import_config: Dict[str, object] = {}
         if metadata:
-            # Convert metadata dict to list of keys/values if needed, or pass as is depending on SDK
-            # SDK expects a list of CustomMetadata objects or similar structure in config
-            # Based on p1.md: customMetadata: [{'key': '...', 'stringValue': '...'}]
             custom_metadata = []
             for k, v in metadata.items():
-                # Simple heuristic for type
                 if isinstance(v, (int, float)):
                     custom_metadata.append({'key': k, 'numeric_value': v})
                 else:
@@ -299,75 +287,64 @@ def upload_file_to_store(store_name: str, uploaded_file, metadata: dict, chunkin
 
         if chunking_config:
             import_config['chunking_config'] = chunking_config
-            
-        # Import the file to the file search store
-        # using import_file (singular)
+
         client.file_search_stores.import_file(
             file_search_store_name=store_name,
             file_name=file.name,
-            config=import_config if import_config else None
+            config=import_config if import_config else None,
         )
-        
+
+        progress.success("✅ File upload complete. Waiting for indexing to finish...")
         return file
     except Exception as e:
-        st.error(f"❌ Error uploading file: {e}")
+        logging.exception("File upload failed")
+        st.error("❌ Error uploading file. Please try again with a smaller or supported file.")
         return None
+    finally:
+        progress.empty()
 
 
-def poll_file_status(file_name: str, timeout: int = 120):
-    """
-    Poll the file status until it becomes ACTIVE or times out.
-    
-    Uses client.files.get() to check the current status.
-    
-    Args:
-        file_name: The resource name of the file
-        timeout: Maximum seconds to wait
-        
-    Returns:
-        The final file status
-    """
-    client = st.session_state.client
+def poll_file_status(file_name: str, timeout: int = 180) -> str:
+    """Poll the file status with bounded retries and status updates."""
+
+    client = require_client()
+    if not client:
+        return "MISSING_CLIENT"
+
     start_time = time.time()
-    
+    status_placeholder = st.empty()
+
     while time.time() - start_time < timeout:
         try:
             file = client.files.get(name=file_name)
-            if hasattr(file, 'state'):
-                if file.state.name == "ACTIVE":
-                    return "ACTIVE"
-                elif file.state.name == "FAILED":
-                    return "FAILED"
-            time.sleep(2)  # Poll every 2 seconds
+            state_name = getattr(getattr(file, "state", None), "name", "UNKNOWN")
+            status_placeholder.info(f"Indexing status: {state_name}")
+
+            if state_name == "ACTIVE":
+                status_placeholder.success("Indexing completed.")
+                return "ACTIVE"
+            if state_name == "FAILED":
+                status_placeholder.error("Indexing failed for this file.")
+                return "FAILED"
+
+            time.sleep(2)
         except Exception as e:
-            return f"ERROR: {e}"
-    
+            logging.exception("Error while polling file status")
+            status_placeholder.warning("Encountered an error while checking status. Retrying...")
+            time.sleep(2)
+
+    status_placeholder.warning("Timed out while waiting for indexing to finish.")
     return "TIMEOUT"
 
 
-def generate_with_file_search(store_name: str, query: str, model_name: str):
-    """
-    Generate content using the File Search tool.
-    
-    Configures the model with the file_search tool pointing to the specified store.
-    
-    Uses:
-    - types.Tool(file_search=types.FileSearch(...)) for tool configuration
-    - client.models.generate_content() for generation
-    
-    Args:
-        store_name: The resource name of the store to search
-        query: The user's question
-        model_name: The model to use (e.g., "gemini-2.0-flash")
-        
-    Returns:
-        Tuple of (response_text, citations)
-    """
+def generate_with_file_search(store_name: str, query: str, model_name: str) -> Tuple[str, List[Dict[str, str]]]:
+    """Generate content using the File Search tool with resilient error handling."""
+
+    client = require_client()
+    if not client:
+        return "Please configure your API key to run a search.", []
+
     try:
-        client = st.session_state.client
-        
-        # Configure the File Search tool with the store
-        # file_search_store_names expects a list of store resource names
         tools = [
             types.Tool(
                 file_search=types.FileSearch(
@@ -375,8 +352,7 @@ def generate_with_file_search(store_name: str, query: str, model_name: str):
                 )
             )
         ]
-        
-        # Generate content with the file search tool
+
         response = client.models.generate_content(
             model=model_name,
             contents=query,
@@ -384,16 +360,14 @@ def generate_with_file_search(store_name: str, query: str, model_name: str):
                 tools=tools
             )
         )
-        
-        # Extract the response text
+
         response_text = ""
         if response.candidates:
             for part in response.candidates[0].content.parts:
                 if hasattr(part, 'text'):
                     response_text += part.text
-        
-        # Extract citations/grounding metadata
-        citations = []
+
+        citations: List[Dict[str, str]] = []
         if response.candidates and hasattr(response.candidates[0], 'grounding_metadata'):
             grounding = response.candidates[0].grounding_metadata
             if hasattr(grounding, 'grounding_chunks'):
@@ -402,12 +376,13 @@ def generate_with_file_search(store_name: str, query: str, model_name: str):
                         citations.append({
                             "title": getattr(chunk.retrieved_context, 'title', 'Unknown'),
                             "uri": getattr(chunk.retrieved_context, 'uri', ''),
-                            "text": getattr(chunk, 'text', '')
+                            "text": getattr(chunk, 'text', ''),
                         })
-        
+
         return response_text, citations
     except Exception as e:
-        return f"❌ Error: {e}", []
+        logging.exception("Generation failed")
+        return "❌ An error occurred while generating the response. Please try again.", []
 
 
 # =============================================================================
@@ -424,18 +399,20 @@ with st.sidebar:
         "Gemini API Key",
         type="password",
         help="Enter your Gemini API key. Get one at https://aistudio.google.com/apikey",
-        placeholder="Enter your API key..."
+        placeholder="Enter your API key...",
+        value=st.session_state.api_key,
     )
-    
-    if api_key:
-        if not st.session_state.api_key_valid or st.session_state.client is None:
-            with st.spinner("Validating API key..."):
-                if initialize_client(api_key):
-                    st.success("✅ Connected to Gemini API")
-    else:
+
+    if api_key and api_key != st.session_state.api_key:
+        with st.spinner("Validating API key..."):
+            if initialize_client(api_key):
+                st.success("✅ Connected to Gemini API")
+    elif not api_key:
         st.info("👆 Enter your API key to get started")
         st.session_state.api_key_valid = False
         st.session_state.client = None
+    elif st.session_state.api_key_valid and st.session_state.client:
+        st.success("✅ Connected to Gemini API")
     
     st.markdown("---")
     
@@ -664,29 +641,36 @@ with tab2:
     
     # Upload button
     if uploaded_file:
-        # Build metadata dict
-        metadata = {}
-        for row in st.session_state.metadata_rows:
-            if row["key"].strip() and row["value"].strip():
-                metadata[row["key"].strip()] = row["value"].strip()
-        
-        if st.button("📤 Upload File", type="primary",
-                    help="Uploads the selected file and indexes it for semantic search"):
-            with st.spinner("Uploading and processing file..."):
-                result = upload_file_to_store(store.name, uploaded_file, metadata, chunking_config)
-                
-                if result:
-                    # Poll for status
-                    status_placeholder = st.empty()
-                    with st.spinner("⏳ Waiting for file to be indexed..."):
-                        final_status = poll_file_status(result.name)
-                    
-                    if final_status == "ACTIVE":
-                        st.success(f"✅ File '{uploaded_file.name}' uploaded and indexed successfully!")
-                    elif final_status == "FAILED":
-                        st.error("❌ File processing failed. Please try again.")
-                    else:
-                        st.warning(f"⚠️ File status: {final_status}")
+        if uploaded_file.size and uploaded_file.size > 25 * 1024 * 1024:
+            st.error("❌ Files larger than 25MB are not supported in this demo.")
+        else:
+            metadata = {}
+            for row in st.session_state.metadata_rows:
+                if row["key"].strip() and row["value"].strip():
+                    metadata[row["key"].strip()] = row["value"].strip()
+
+            if st.button(
+                "📤 Upload File",
+                type="primary",
+                help="Uploads the selected file and indexes it for semantic search",
+            ):
+                with st.spinner("Uploading and processing file..."):
+                    result = upload_file_to_store(
+                        store.name, uploaded_file, metadata, chunking_config
+                    )
+
+                    if result:
+                        with st.spinner("⏳ Waiting for file to be indexed..."):
+                            final_status = poll_file_status(result.name)
+
+                        if final_status == "ACTIVE":
+                            st.success(
+                                f"✅ File '{uploaded_file.name}' uploaded and indexed successfully!"
+                            )
+                        elif final_status == "FAILED":
+                            st.error("❌ File processing failed. Please try again.")
+                        else:
+                            st.warning(f"⚠️ File status: {final_status}")
     
     st.markdown("---")
 
