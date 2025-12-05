@@ -143,7 +143,7 @@ def initialize_client(api_key: str) -> bool:
         
         # Test the client by listing models (lightweight operation)
         # This validates the API key is correct and active
-        list(client.models.list(page_size=1))
+        list(client.models.list())
         
         st.session_state.client = client
         st.session_state.api_key_valid = True
