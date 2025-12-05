@@ -703,13 +703,16 @@ with tab2:
         for f in files:
             try:
                 # Defensive extraction of attributes
+                # Use getattr with defaults for all properties
                 name = getattr(f, 'display_name', None) or getattr(f, 'name', 'Unknown')
                 size = getattr(f, 'size_bytes', 0)
                 
                 # Handle status/state carefully
                 status = "Unknown"
+                # Check if 'state' attribute exists first
                 if hasattr(f, 'state'):
                     state_val = f.state
+                    # Check if it's an enum with a name
                     if hasattr(state_val, 'name'):
                         status = state_val.name
                     else:
