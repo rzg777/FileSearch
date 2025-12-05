@@ -42,9 +42,10 @@ Visual control center (GUI) for managing knowledge bases (RAG) using the Gemini 
 ## Deploying privately on share.streamlit.io
 1. Push this repository to a GitHub repo you can connect privately.
 2. On [share.streamlit.io](https://share.streamlit.io/), create a new app and connect it to your GitHub repo/branch. Choose **Visibility → Private** so only invited users can open it.
-3. Because each user supplies their own Gemini API key as their "ticket" to access data, do **not** preload a shared key as a secret. The sidebar key entry will be required for every session, and the app will not persist or log it.
-4. Ensure **Dependencies** points to `requirements.txt` (Streamlit reads it automatically; no additional config files are needed).
-5. Deploy and share private access with intended users. They will be prompted to paste their Gemini API key on every visit.
+3. In the **Main file path** field, enter `streamlit_app.py` (an entrypoint that imports `app.py`). The default `streamlit_app.py` name is required by Streamlit Cloud; without it the deployment form will display a "This file does not exist" error.
+4. Because each user supplies their own Gemini API key as their "ticket" to access data, do **not** preload a shared key as a secret. The sidebar key entry will be required for every session, and the app will not persist or log it.
+5. Ensure **Dependencies** points to `requirements.txt` (Streamlit reads it automatically; no additional config files are needed).
+6. Deploy and share private access with intended users. They will be prompted to paste their Gemini API key on every visit.
 
 ## Features & Usage
 - **Store management**: Create new File Search Stores, view existing stores, and refresh the list to keep it in sync with the Gemini API.
