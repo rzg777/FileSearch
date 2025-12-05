@@ -6,6 +6,9 @@ This application allows users to:
 1. Create and manage File Search Stores
 2. Upload files with custom metadata
 3. Test retrieval quality in a real-time chat playground
+
+SECURITY NOTE: This app uses a strict "Bring Your Own Key" (BYOK) architecture. 
+Your API key is never stored on the server and is only used for the duration of your session.
 """
 
 import streamlit as st
@@ -15,7 +18,6 @@ from datetime import datetime
 import os
 
 # Google GenAI SDK imports
-# google.genai is the main client library for Gemini API
 from google import genai
 from google.genai import types
 
@@ -114,6 +116,10 @@ def init_session_state():
         st.session_state.stores_list = []
     if "api_key_valid" not in st.session_state:
         st.session_state.api_key_valid = False
+    # Store the API key in session state temporarily to handle reruns without losing auth context
+    # ideally we just rely on client, but for UI feedback we keep a flag
+    if "current_api_key" not in st.session_state:
+        st.session_state.current_api_key = ""
 
 init_session_state()
 
@@ -124,9 +130,6 @@ init_session_state()
 def initialize_client(api_key: str) -> bool:
     """
     Initialize the Google GenAI client with the provided API key.
-    
-    Uses genai.Client() to create a new client instance.
-    The client is stored in session state to persist across reruns.
     
     Args:
         api_key: The Gemini API key
@@ -139,8 +142,8 @@ def initialize_client(api_key: str) -> bool:
         client = genai.Client(api_key=api_key)
         
         # Test the client by listing models (lightweight operation)
-        # This validates the API key is correct
-        list(client.models.list())
+        # This validates the API key is correct and active
+        list(client.models.list(page_size=1))
         
         st.session_state.client = client
         st.session_state.api_key_valid = True
@@ -150,24 +153,18 @@ def initialize_client(api_key: str) -> bool:
         st.session_state.api_key_valid = False
         error_msg = str(e).lower()
         if "invalid" in error_msg or "api key" in error_msg:
-            st.error("❌ Invalid API Key. Please check your key and try again.")
+            st.sidebar.error("❌ Invalid API Key. Please check your key.")
         elif "quota" in error_msg:
-            st.error("❌ Quota Exceeded. Please check your API usage limits.")
+            st.sidebar.error("❌ Quota Exceeded. Please check your API usage limits.")
         else:
-            st.error(f"❌ Error initializing client: {e}")
+            st.sidebar.error(f"❌ Connection Error: {e}")
         return False
 
 
 def list_stores():
-    """
-    List all File Search Stores for the current user.
-    
-    Uses client.file_search_stores.list() to retrieve all stores.
-    Returns a list of store objects with name and display_name.
-    """
+    """List all File Search Stores for the current user."""
     try:
         client = st.session_state.client
-        # List all file search stores
         stores = list(client.file_search_stores.list())
         st.session_state.stores_list = stores
         return stores
@@ -177,21 +174,9 @@ def list_stores():
 
 
 def create_store(display_name: str):
-    """
-    Create a new File Search Store.
-    
-    Uses client.file_search_stores.create() with the display_name parameter.
-    
-    Args:
-        display_name: Human-readable name for the store
-        
-    Returns:
-        The created store object or None if failed
-    """
+    """Create a new File Search Store."""
     try:
         client = st.session_state.client
-        # Create a new file search store with the given display name
-        # Updated to use config dict as per new SDK version
         store = client.file_search_stores.create(
             config={'display_name': display_name}
         )
@@ -202,17 +187,9 @@ def create_store(display_name: str):
 
 
 def delete_store(store_name: str):
-    """
-    Delete a File Search Store.
-    
-    Uses client.file_search_stores.delete() with the store resource name.
-    
-    Args:
-        store_name: The resource name of the store (e.g., "fileSearchStores/abc123")
-    """
+    """Delete a File Search Store."""
     try:
         client = st.session_state.client
-        # Added config={'force': True} to ensure deletion works
         client.file_search_stores.delete(name=store_name, config={'force': True})
         return True
     except Exception as e:
@@ -221,21 +198,14 @@ def delete_store(store_name: str):
 
 
 def list_files(store_name: str):
-    """
-    List all files in a File Search Store.
-    
-    Uses client.file_search_stores.files.list() to get files in a store.
-    
-    Args:
-        store_name: The resource name of the store
-        
-    Returns:
-        List of file objects
-    """
+    """List all files in a File Search Store."""
     try:
         client = st.session_state.client
+        # Note: listing files is global in the current API version, filtering might be needed client-side
+        # if the API doesn't support store-specific filtering in list() directly yet.
+        # However, we will just list all files the user has access to or try to rely on the SDK.
+        # Currently client.files.list() lists all files in the project.
         files = list(client.files.list())
-        # Filter files that belong to this store if possible
         return files
     except Exception as e:
         st.error(f"❌ Error listing files: {e}")
@@ -243,29 +213,11 @@ def list_files(store_name: str):
 
 
 def upload_file_to_store(store_name: str, uploaded_file, metadata: dict, chunking_config: dict = None):
-    """
-    Upload a file to a File Search Store with custom metadata and chunking config.
-    
-    Process:
-    1. Upload the file using client.files.upload()
-    2. Import it to the store using file_search_stores.import_file()
-    
-    Args:
-        store_name: The resource name of the store
-        uploaded_file: The Streamlit UploadedFile object
-        metadata: Dictionary of custom metadata key-value pairs
-        chunking_config: Optional dictionary for chunking configuration
-        
-    Returns:
-        The file object or None if failed
-    """
+    """Upload a file to a File Search Store."""
     try:
         client = st.session_state.client
         
-        # First, upload the file to Gemini Files API
-        # The file is uploaded as bytes with the original filename
-        # Using config={'display_name': ...} as per SDK requirements
-        # Added mime_type argument to fix "Unknown mime type" error
+        # Upload file to Gemini Files API
         file = client.files.upload(
             file=uploaded_file,
             config={'display_name': uploaded_file.name, 'mime_type': uploaded_file.type}
@@ -274,12 +226,8 @@ def upload_file_to_store(store_name: str, uploaded_file, metadata: dict, chunkin
         # Prepare import config
         import_config = {}
         if metadata:
-            # Convert metadata dict to list of keys/values if needed, or pass as is depending on SDK
-            # SDK expects a list of CustomMetadata objects or similar structure in config
-            # Based on p1.md: customMetadata: [{'key': '...', 'stringValue': '...'}]
             custom_metadata = []
             for k, v in metadata.items():
-                # Simple heuristic for type
                 if isinstance(v, (int, float)):
                     custom_metadata.append({'key': k, 'numeric_value': v})
                 else:
@@ -289,8 +237,7 @@ def upload_file_to_store(store_name: str, uploaded_file, metadata: dict, chunkin
         if chunking_config:
             import_config['chunking_config'] = chunking_config
             
-        # Import the file to the file search store
-        # using import_file (singular)
+        # Import to store
         client.file_search_stores.import_file(
             file_search_store_name=store_name,
             file_name=file.name,
@@ -304,18 +251,7 @@ def upload_file_to_store(store_name: str, uploaded_file, metadata: dict, chunkin
 
 
 def poll_file_status(file_name: str, timeout: int = 120):
-    """
-    Poll the file status until it becomes ACTIVE or times out.
-    
-    Uses client.files.get() to check the current status.
-    
-    Args:
-        file_name: The resource name of the file
-        timeout: Maximum seconds to wait
-        
-    Returns:
-        The final file status
-    """
+    """Poll the file status until it becomes ACTIVE or times out."""
     client = st.session_state.client
     start_time = time.time()
     
@@ -327,36 +263,17 @@ def poll_file_status(file_name: str, timeout: int = 120):
                     return "ACTIVE"
                 elif file.state.name == "FAILED":
                     return "FAILED"
-            time.sleep(2)  # Poll every 2 seconds
+            time.sleep(2)
         except Exception as e:
             return f"ERROR: {e}"
-    
     return "TIMEOUT"
 
 
 def generate_with_file_search(store_name: str, query: str, model_name: str):
-    """
-    Generate content using the File Search tool.
-    
-    Configures the model with the file_search tool pointing to the specified store.
-    
-    Uses:
-    - types.Tool(file_search=types.FileSearch(...)) for tool configuration
-    - client.models.generate_content() for generation
-    
-    Args:
-        store_name: The resource name of the store to search
-        query: The user's question
-        model_name: The model to use (e.g., "gemini-2.0-flash")
-        
-    Returns:
-        Tuple of (response_text, citations)
-    """
+    """Generate content using the File Search tool."""
     try:
         client = st.session_state.client
         
-        # Configure the File Search tool with the store
-        # file_search_store_names expects a list of store resource names
         tools = [
             types.Tool(
                 file_search=types.FileSearch(
@@ -365,7 +282,6 @@ def generate_with_file_search(store_name: str, query: str, model_name: str):
             )
         ]
         
-        # Generate content with the file search tool
         response = client.models.generate_content(
             model=model_name,
             contents=query,
@@ -374,14 +290,12 @@ def generate_with_file_search(store_name: str, query: str, model_name: str):
             )
         )
         
-        # Extract the response text
         response_text = ""
         if response.candidates:
             for part in response.candidates[0].content.parts:
                 if hasattr(part, 'text'):
                     response_text += part.text
         
-        # Extract citations/grounding metadata
         citations = []
         if response.candidates and hasattr(response.candidates[0], 'grounding_metadata'):
             grounding = response.candidates[0].grounding_metadata
@@ -400,126 +314,128 @@ def generate_with_file_search(store_name: str, query: str, model_name: str):
 
 
 # =============================================================================
-# SIDEBAR - API KEY & CONFIGURATION
+# SIDEBAR - AUTHENTICATION & CONFIGURATION
 # =============================================================================
 with st.sidebar:
     st.image("https://www.gstatic.com/lamda/images/gemini_sparkle_v002_d4735304ff6292a690345.svg", width=50)
     st.title("🔍 File Search Studio")
     st.markdown("---")
     
-    # API Key Input
     st.subheader("🔑 Authentication")
+    st.write("Enter your Gemini API Key to connect to your Google Cloud Project.")
     
-    api_key = None
-    
-    # Check if API key is in secrets
-    if "GEMINI_API_KEY" in st.secrets:
-        api_key = st.secrets["GEMINI_API_KEY"]
-        st.success("✅ API Key configured via Secrets")
+    # 1. BYOK Input Field
+    api_key_input = st.text_input(
+        "Gemini API Key",
+        type="password",
+        help="Your key is not stored securely on the server. It is only used for this session.",
+        placeholder="AIza..."
+    )
+
+    # 2. Get Key Link
+    st.markdown("[Get your free key here ↗️](https://aistudio.google.com/app/apikey)")
+    st.caption("🔒 **Security Note:** Your data is stored in your own Google Cloud project. This app interface serves as a client and does not persist your files locally.")
+
+    # 3. Validation Logic
+    if api_key_input:
+        if not api_key_input.startswith("AIza"):
+            st.error("⚠️ Invalid key format. Gemini keys typically start with 'AIza'.")
+            st.session_state.client = None
+            st.session_state.api_key_valid = False
+        else:
+            # Avoid re-initializing if key hasn't changed and is already valid
+            if api_key_input != st.session_state.current_api_key or not st.session_state.api_key_valid:
+                with st.spinner("Connecting to Gemini API..."):
+                    if initialize_client(api_key_input):
+                        st.session_state.current_api_key = api_key_input
+                        st.success("✅ Connected")
+                    else:
+                        st.session_state.current_api_key = ""
     else:
-        api_key = st.text_input(
-            "Gemini API Key",
-            type="password",
-            help="Enter your Gemini API key. Get one at https://aistudio.google.com/apikey",
-            placeholder="Enter your API key..."
-        )
-    
-    if api_key:
-        if not st.session_state.api_key_valid or st.session_state.client is None:
-            with st.spinner("Validating API key..."):
-                if initialize_client(api_key):
-                    # Only show success message if we just initialized and it wasn't from secrets (to avoid double success messages)
-                    if "GEMINI_API_KEY" not in st.secrets:
-                        st.success("✅ Connected to Gemini API")
-    else:
-        st.info("👆 Enter your API key to get started")
-        st.session_state.api_key_valid = False
         st.session_state.client = None
-    
+        st.session_state.api_key_valid = False
+
     st.markdown("---")
     
-    # Model Selection (for chat)
+    # Model Selection (Only visible if auth is successful, or always visible but disabled? Better always visible)
     st.subheader("🤖 Model Configuration")
     selected_model = st.selectbox(
         "Select Model",
         ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-pro-preview"],
-        help="Choose the model for RAG queries. Flash models are faster, Pro is more capable."
+        help="Choose the model for RAG queries."
     )
     
     st.markdown("---")
-    st.caption("Built with ❤️ using Streamlit & Google GenAI SDK")
+    st.caption(f"v1.1.0 | BYOK Enabled")
 
 
 # =============================================================================
 # MAIN CONTENT AREA
 # =============================================================================
 
-# Help Expander - Always visible at top
+st.title("🔍 Gemini File Search Studio")
+st.caption("Manage your RAG knowledge bases, upload files, and test retrieval quality")
+
+# EXPANDER: Help / How-To
 with st.expander("📖 How to use this tool", expanded=False):
     st.markdown("""
     ## Welcome to Gemini File Search Studio! 🎉
     
-    This tool helps you create and manage RAG (Retrieval Augmented Generation) knowledge bases.
-    
     ### 🚀 Quick Start Guide
     
-    1. **Create a Store** 📚
-       - A Store is like a folder for your documents
-       - Go to the "Manage Stores" tab and create one with a descriptive name
+    1. **Connect** 🔑
+       - Enter your Gemini API key in the sidebar. This connects the studio to your private Google Cloud environment.
     
-    2. **Upload Files** 📁
-       - Select your store from the dropdown
-       - Upload PDFs, TXT, CSV, or other documents
-       - Add custom metadata (like "category: finance") to help organize
+    2. **Create a Store** 📚
+       - Go to "Manage Stores" and create a new knowledge base.
     
-    3. **Chat & Search** 💬
-       - Go to the "Test & Chat" tab
-       - Select your store and ask questions!
-       - The AI will search your documents and cite its sources
+    3. **Upload Files** 📁
+       - Upload documents (PDF, TXT, etc.) to your store. 
+       - Add metadata keywords for better organization.
     
-    ### 💡 Tips
-    - **Metadata** helps filter and organize your documents
-    - **Citations** show exactly where the AI found information
-    - Use **descriptive store names** for easy management
+    4. **Test & Chat** 💬
+       - Ask questions in the "Test & Chat" tab to verify the model retrieves the right information.
     """)
 
-st.title("🔍 Gemini File Search Studio")
-st.caption("Manage your RAG knowledge bases, upload files, and test retrieval quality")
+# 4. BLOCKING AUTH CHECK
+if not st.session_state.api_key_valid or not st.session_state.client:
+    st.info("👆 **Please enter your Gemini API Key in the sidebar to start.**")
+    st.warning("This application requires a valid API key to function. No data is stored on this server.")
+    st.stop()  # STOPS EXECUTION HERE until key is valid
 
-# Check if client is initialized
-if not st.session_state.api_key_valid or st.session_state.client is None:
-    st.warning("⚠️ Please enter a valid API key in the sidebar to continue.")
-    st.stop()
+
+# =============================================================================
+# AUTHENTICATED CONTENT STARTS HERE
+# =============================================================================
 
 # Main tabs
 tab1, tab2, tab3 = st.tabs(["📚 Manage Stores", "📁 Manage Files", "💬 Test & Chat"])
 
-# =============================================================================
 # TAB 1: MANAGE STORES
-# =============================================================================
 with tab1:
     st.header("📚 Store Management")
-    st.markdown("A **Store** is a container for your indexed documents. Think of it as a folder for your RAG knowledge base.")
+    st.markdown("A **Store** is a container for your indexed documents.")
     
     col1, col2 = st.columns([2, 1])
     
     with col1:
         st.subheader("Your Stores")
         
-        # Refresh button
-        if st.button("🔄 Refresh Stores", help="Reload the list of stores from the API"):
+        if st.button("🔄 Refresh Stores"):
             with st.spinner("Loading stores..."):
                 list_stores()
         
-        # Load stores if not already loaded
         if not st.session_state.stores_list:
-            with st.spinner("Loading stores..."):
-                list_stores()
+            # Try to load if empty, but don't loop infinitely if truly empty
+            # We trust the user to hit refresh or we do one initial load
+            if "loaded_stores_once" not in st.session_state:
+                with st.spinner("Loading stores..."):
+                    list_stores()
+                    st.session_state.loaded_stores_once = True
         
         stores = st.session_state.stores_list
         
         if stores:
-            # Display stores in a selectbox
             store_options = {
                 f"{getattr(s, 'display_name', 'Unnamed')} ({s.name})": s 
                 for s in stores
@@ -528,16 +444,13 @@ with tab1:
             selected_store_key = st.selectbox(
                 "Select a Store",
                 options=list(store_options.keys()),
-                help="Choose a store to view its details and manage files"
             )
             
             if selected_store_key:
                 selected_store = store_options[selected_store_key]
                 st.session_state.selected_store = selected_store
                 
-                # Display Store ID prominently
-                st.markdown("#### Store Details")
-                
+                # Display Store ID
                 store_id = selected_store.name
                 st.markdown(f"""
                 <div class="store-id-box">
@@ -546,303 +459,186 @@ with tab1:
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Copy button
-                col_copy, col_delete = st.columns([1, 1])
-                with col_copy:
-                    if st.button("📋 Copy Store ID", help="Copy the Store ID to your clipboard"):
-                        st.code(store_id)
-                        st.info("👆 Select and copy the ID above (Ctrl+C)")
-                
-                with col_delete:
-                    if st.button("🗑️ Delete Store", type="secondary", 
-                               help="Permanently removes this store and all its files. This cannot be undone."):
-                        with st.spinner("Deleting store..."):
-                            if delete_store(store_id):
-                                st.success("✅ Store deleted successfully!")
-                                st.session_state.stores_list = []
-                                st.session_state.selected_store = None
-                                st.rerun()
+                if st.button("🗑️ Delete Store", type="secondary"):
+                    if delete_store(store_id):
+                        st.success("✅ Store deleted successfully!")
+                        list_stores() # Refresh list
+                        st.rerun()
         else:
-            st.info("📭 No stores found. Create your first store below!")
+            st.info("📭 No stores found.")
     
     with col2:
         st.subheader("➕ Create New Store")
+        new_store_name = st.text_input("Store Display Name", placeholder="e.g., Q1 Reports")
         
-        new_store_name = st.text_input(
-            "Store Display Name",
-            placeholder="e.g., Financial Reports 2024",
-            help="Give your store a descriptive name to easily identify it later"
-        )
-        
-        if st.button("Create Store", type="primary", 
-                    help="Creates a new File Search Store with the given name"):
+        if st.button("Create Store", type="primary"):
             if new_store_name.strip():
                 with st.spinner("Creating store..."):
                     new_store = create_store(new_store_name.strip())
                     if new_store:
-                        st.success(f"✅ Store '{new_store_name}' created successfully!")
-                        st.session_state.stores_list = []  # Force refresh
+                        st.success(f"✅ Store '{new_store_name}' created!")
+                        list_stores() # Refresh list
                         st.rerun()
             else:
                 st.warning("⚠️ Please enter a store name")
 
 
-# =============================================================================
+def delete_file(file_name: str):
+    """Delete a file from the project."""
+    try:
+        client = st.session_state.client
+        client.files.delete(name=file_name)
+        return True
+    except Exception as e:
+        st.error(f"❌ Error deleting file: {e}")
+        return False
+
+# ... (Previous helper functions remain)
+
 # TAB 2: MANAGE FILES
-# =============================================================================
 with tab2:
     st.header("📁 File Management")
     
     if not st.session_state.selected_store:
         st.warning("⚠️ Please select a store in the 'Manage Stores' tab first.")
-        st.stop()
-    
-    store = st.session_state.selected_store
-    st.info(f"📚 Currently viewing: **{getattr(store, 'display_name', store.name)}**")
-    
-    # File upload section
-    st.subheader("📤 Upload New File")
-    
-    col_upload, col_meta = st.columns([1, 1])
-    
-    with col_upload:
-        uploaded_file = st.file_uploader(
-            "Choose a file",
-            type=["pdf", "txt", "csv", "docx", "doc", "html", "md"],
-            help="Upload a file to index for semantic search. Supported formats: PDF, TXT, CSV, DOCX, HTML, Markdown"
-        )
-    
-    with col_meta:
-        st.markdown("#### 🏷️ Custom Metadata")
-        st.caption("Add key-value pairs to help organize and filter your files")
-        
-        # Dynamic metadata rows
-        metadata_container = st.container()
-        
-        with metadata_container:
-            for i, row in enumerate(st.session_state.metadata_rows):
-                col_key, col_val, col_del = st.columns([2, 2, 1])
-                with col_key:
-                    st.session_state.metadata_rows[i]["key"] = st.text_input(
-                        f"Key {i+1}",
-                        value=row["key"],
-                        placeholder="e.g., category",
-                        key=f"meta_key_{i}",
-                        label_visibility="collapsed"
-                    )
-                with col_val:
-                    st.session_state.metadata_rows[i]["value"] = st.text_input(
-                        f"Value {i+1}",
-                        value=row["value"],
-                        placeholder="e.g., finance",
-                        key=f"meta_val_{i}",
-                        label_visibility="collapsed"
-                    )
-                with col_del:
-                    if len(st.session_state.metadata_rows) > 1:
-                        if st.button("🗑️", key=f"del_meta_{i}", help="Remove this metadata row"):
-                            st.session_state.metadata_rows.pop(i)
-                            st.rerun()
-        
-        if st.button("➕ Add Metadata Row", help="Add another key-value pair"):
-            st.session_state.metadata_rows.append({"key": "", "value": ""})
-            st.rerun()
-
-        st.markdown("#### ⚙️ Advanced Chunking Settings")
-        with st.expander("Configure Chunking Strategy"):
-            st.caption("Customize how your documents are split into chunks.")
-            max_tokens = st.number_input("Max Tokens per Chunk", min_value=100, max_value=2048, value=200, step=50, help="Maximum number of tokens in a single chunk")
-            overlap_tokens = st.number_input("Max Overlap Tokens", min_value=0, max_value=500, value=20, step=10, help="Number of tokens to overlap between chunks")
-            
-            chunking_config = {
-                "white_space_config": {
-                    "max_tokens_per_chunk": max_tokens,
-                    "max_overlap_tokens": overlap_tokens
-                }
-            }
-    
-    # Upload button
-    if uploaded_file:
-        # Build metadata dict
-        metadata = {}
-        for row in st.session_state.metadata_rows:
-            if row["key"].strip() and row["value"].strip():
-                metadata[row["key"].strip()] = row["value"].strip()
-        
-        if st.button("📤 Upload File", type="primary",
-                    help="Uploads the selected file and indexes it for semantic search"):
-            with st.spinner("Uploading and processing file..."):
-                result = upload_file_to_store(store.name, uploaded_file, metadata, chunking_config)
-                
-                if result:
-                    # Poll for status
-                    status_placeholder = st.empty()
-                    with st.spinner("⏳ Waiting for file to be indexed..."):
-                        final_status = poll_file_status(result.name)
-                    
-                    if final_status == "ACTIVE":
-                        st.success(f"✅ File '{uploaded_file.name}' uploaded and indexed successfully!")
-                    elif final_status == "FAILED":
-                        st.error("❌ File processing failed. Please try again.")
-                    else:
-                        st.warning(f"⚠️ File status: {final_status}")
-    
-    st.markdown("---")
-    
-    # Files table
-    st.subheader("📋 Files in This Store")
-    
-    if st.button("🔄 Refresh Files", help="Reload the list of files"):
-        st.rerun()
-    
-    files = list_files(store.name)
-    
-    if files:
-        # Create DataFrame for display
-        file_data = []
-        for f in files:
-            try:
-                # Defensive extraction of attributes
-                # Use getattr with defaults for all properties
-                name = getattr(f, 'display_name', None) or getattr(f, 'name', 'Unknown')
-                size = getattr(f, 'size_bytes', 0)
-                
-                # Handle status/state carefully
-                status = "Unknown"
-                # Check if 'state' attribute exists first
-                if hasattr(f, 'state'):
-                    state_val = f.state
-                    # Check if it's an enum with a name
-                    if hasattr(state_val, 'name'):
-                        status = state_val.name
-                    else:
-                        status = str(state_val)
-                
-                created = getattr(f, 'create_time', None)
-                resource_name = getattr(f, 'name', '')
-                
-                file_data.append({
-                    "Name": name,
-                    "Size": size,
-                    "Status": status,
-                    "Created": created,
-                    "Resource Name": resource_name
-                })
-            except Exception as e:
-                # Log error but don't crash the app
-                print(f"Error processing file object: {e}")
-                continue
-        
-        if file_data:
-            df = pd.DataFrame(file_data)
-            st.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Name": st.column_config.TextColumn("📄 Name", width="medium"),
-                    "Size": st.column_config.NumberColumn("📊 Size (bytes)", width="small"),
-                    "Status": st.column_config.TextColumn("🔄 Status", width="small"),
-                    "Created": st.column_config.DatetimeColumn("📅 Created", width="medium"),
-                    "Resource Name": st.column_config.TextColumn("🔗 Resource Name", width="large"),
-                }
-            )
-        else:
-            st.info("📭 No valid files found in this store.")
     else:
-        st.info("📭 No files in this store yet. Upload your first file above!")
+        store = st.session_state.selected_store
+        st.info(f"📚 Viewing Store: **{getattr(store, 'display_name', store.name)}**")
+        
+        # Upload Section
+        st.subheader("📤 Upload New File")
+        col_upload, col_meta = st.columns([1, 1])
+        
+        with col_upload:
+            uploaded_file = st.file_uploader("Choose a file", type=["pdf", "txt", "csv", "docx", "md"])
+        
+        with col_meta:
+            st.markdown("#### 🏷️ Metadata & Config")
+            # Metadata UI
+            for i, row in enumerate(st.session_state.metadata_rows):
+                c1, c2, c3 = st.columns([2, 2, 1])
+                with c1:
+                    st.session_state.metadata_rows[i]["key"] = st.text_input(f"Key", value=row["key"], key=f"k{i}", label_visibility="collapsed", placeholder="key")
+                with c2:
+                    st.session_state.metadata_rows[i]["value"] = st.text_input(f"Value", value=row["value"], key=f"v{i}", label_visibility="collapsed", placeholder="value")
+                with c3:
+                    if len(st.session_state.metadata_rows) > 1 and st.button("🗑️", key=f"d{i}"):
+                        st.session_state.metadata_rows.pop(i)
+                        st.rerun()
+            
+            if st.button("➕ Add Row"):
+                st.session_state.metadata_rows.append({"key": "", "value": ""})
+                st.rerun()
+            
+            with st.expander("chunking config"):
+                max_tokens = st.number_input("Max Tokens", min_value=100, max_value=2048, value=200)
+                overlap = st.number_input("Overlap", min_value=0, max_value=500, value=20)
+                chunking_config = {"white_space_config": {"max_tokens_per_chunk": max_tokens, "max_overlap_tokens": overlap}}
 
+        if uploaded_file and st.button("📤 Upload File", type="primary"):
+            metadata = {r["key"]: r["value"] for r in st.session_state.metadata_rows if r["key"] and r["value"]}
+            with st.spinner("Processing..."):
+                res = upload_file_to_store(store.name, uploaded_file, metadata, chunking_config)
+                if res:
+                    status = poll_file_status(res.name)
+                    if status == "ACTIVE":
+                        st.success(f"✅ {uploaded_file.name} indexed!")
+                    else:
+                        st.error(f"❌ Failed: {status}")
 
-# =============================================================================
-# TAB 3: TEST & CHAT (RAG PLAYGROUND)
-# =============================================================================
+        st.markdown("---")
+        
+        # Files List with Delete Buttons
+        st.subheader("📋 Files List")
+        
+        col_refresh, _ = st.columns([1, 5])
+        with col_refresh:
+            if st.button("🔄 Refresh Files"):
+                st.rerun()
+            
+        files = list_files(store.name)
+        
+        if files:
+            # Header Row
+            h1, h2, h3, h4, h5 = st.columns([3, 1, 2, 2, 1])
+            h1.markdown("**Name**")
+            h2.markdown("**Size**")
+            h3.markdown("**Status**")
+            h4.markdown("**Created**")
+            h5.markdown("**Action**")
+            
+            st.divider()
+            
+            # File Rows
+            for f in files:
+                c1, c2, c3, c4, c5 = st.columns([3, 1, 2, 2, 1])
+                
+                try:
+                    name = getattr(f, 'display_name', None) or getattr(f, 'name', 'Unknown')
+                    size = f"{getattr(f, 'size_bytes', 0) / 1024:.1f} KB"
+                    status = f.state.name if hasattr(f, 'state') else "Unknown"
+                    created = getattr(f, 'create_time', 'Unknown')
+                    resource_name = getattr(f, 'name', '')
+                    
+                    c1.write(name)
+                    c2.write(size)
+                    c3.write(status)
+                    c4.write(created)
+                    
+                    # Delete Button
+                    # We use resource_name as the key to ensure uniqueness
+                    if c5.button("🗑️", key=f"del_{resource_name}", help=f"Delete {name}"):
+                        with st.spinner(f"Deleting {name}..."):
+                            if delete_file(resource_name):
+                                st.success(f"Deleted {name}")
+                                time.sleep(1) # Small delay for UX
+                                st.rerun()
+                                
+                except Exception as e:
+                    st.error(f"Error parsing file row: {e}")
+            
+            st.divider()
+        else:
+            st.info("No files found in project.")
+
+# TAB 3: TEST & CHAT
 with tab3:
     st.header("💬 Test & Chat")
-    st.markdown("Ask questions about the documents in your selected store")
     
     if not st.session_state.selected_store:
-        st.warning("⚠️ Please select a store in the 'Manage Stores' tab first.")
-        st.stop()
-    
-    store = st.session_state.selected_store
-    
-    # Configuration bar
-    col_config1, col_config2 = st.columns([1, 1])
-    with col_config1:
-        st.info(f"📚 Searching in: **{getattr(store, 'display_name', store.name)}**")
-    with col_config2:
-        st.info(f"🤖 Using model: **{selected_model}**")
-    
-    # Clear chat button
-    if st.button("🗑️ Clear Chat History", help="Remove all messages from the chat"):
-        st.session_state.chat_history = []
-        st.rerun()
-    
-    st.markdown("---")
-    
-    # Chat history display
-    chat_container = st.container()
-    
-    with chat_container:
-        for message in st.session_state.chat_history:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-                
-                # Display citations if present
-                if message["role"] == "assistant" and "citations" in message and message["citations"]:
-                    with st.expander("📄 Sources & Citations", expanded=True):
-                        for i, citation in enumerate(message["citations"], 1):
-                            st.markdown(f"""
-                            <div class="citation-box">
-                                <strong>📎 Source {i}:</strong> {citation.get('title', 'Unknown')}<br>
-                                <small>{citation.get('uri', '')}</small><br>
-                                <em>"{citation.get('text', 'No snippet available')[:200]}..."</em>
-                            </div>
-                            """, unsafe_allow_html=True)
-    
-    # Chat input
-    user_query = st.chat_input(
-        "Ask a question about your documents...",
-        key="chat_input"
-    )
-    
-    if user_query:
-        # Add user message to history
-        st.session_state.chat_history.append({
-            "role": "user",
-            "content": user_query
-        })
+        st.warning("⚠️ Please select a store first.")
+    else:
+        store = st.session_state.selected_store
         
-        # Display user message
-        with st.chat_message("user"):
-            st.markdown(user_query)
-        
-        # Generate response
-        with st.chat_message("assistant"):
-            with st.spinner("🔍 Searching documents and generating response..."):
-                response_text, citations = generate_with_file_search(
-                    store.name,
-                    user_query,
-                    selected_model
-                )
+        # Chat interface
+        if st.button("🗑️ Clear Chat"):
+            st.session_state.chat_history = []
+            st.rerun()
             
-            st.markdown(response_text)
+        for msg in st.session_state.chat_history:
+            with st.chat_message(msg["role"]):
+                st.write(msg["content"])
+                if "citations" in msg and msg["citations"]:
+                    with st.expander("Sources"):
+                        for c in msg["citations"]:
+                            st.info(f"**{c.get('title')}**: {c.get('text')}")
+
+        if prompt := st.chat_input("Ask a question about your documents..."):
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.write(prompt)
             
-            # Display citations
-            if citations:
-                with st.expander("📄 Sources & Citations", expanded=True):
-                    for i, citation in enumerate(citations, 1):
-                        st.markdown(f"""
-                        <div class="citation-box">
-                            <strong>📎 Source {i}:</strong> {citation.get('title', 'Unknown')}<br>
-                            <small>{citation.get('uri', '')}</small><br>
-                            <em>"{citation.get('text', 'No snippet available')[:200]}..."</em>
-                        </div>
-                        """, unsafe_allow_html=True)
+            with st.chat_message("assistant"):
+                with st.spinner("Searching..."):
+                    response, citations = generate_with_file_search(store.name, prompt, selected_model)
+                    st.write(response)
+                    if citations:
+                        with st.expander("Sources"):
+                            for c in citations:
+                                st.info(f"**{c.get('title')}**: {c.get('text')}")
             
-            # Add assistant message to history
             st.session_state.chat_history.append({
                 "role": "assistant",
-                "content": response_text,
+                "content": response,
                 "citations": citations
             })
