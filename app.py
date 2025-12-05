@@ -10,6 +10,7 @@ This application allows users to:
 
 import io
 import logging
+import os
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -104,6 +105,8 @@ st.markdown("""
 # =============================================================================
 def init_session_state():
     """Initialize all session state variables."""
+
+    env_api_key = os.getenv("GOOGLE_API_KEY", "").strip()
     defaults = {
         "client": None,
         "selected_store": None,
@@ -111,7 +114,7 @@ def init_session_state():
         "metadata_rows": [{"key": "", "value": ""}],
         "stores_list": [],
         "api_key_valid": False,
-        "api_key": "",
+        "api_key": env_api_key,
     }
 
     for key, value in defaults.items():
@@ -395,6 +398,11 @@ with st.sidebar:
     
     # API Key Input
     st.subheader("🔑 Authentication")
+    env_api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+
+    if env_api_key and not st.session_state.api_key:
+        st.session_state.api_key = env_api_key
+
     api_key = st.text_input(
         "Gemini API Key",
         type="password",
@@ -403,12 +411,21 @@ with st.sidebar:
         value=st.session_state.api_key,
     )
 
-    if api_key and api_key != st.session_state.api_key:
+    api_key = api_key.strip()
+
+    should_validate = api_key and (
+        api_key != st.session_state.api_key or not st.session_state.api_key_valid
+    )
+
+    if should_validate:
         with st.spinner("Validating API key..."):
             if initialize_client(api_key):
                 st.success("✅ Connected to Gemini API")
     elif not api_key:
-        st.info("👆 Enter your API key to get started")
+        st.info(
+            "👆 Enter your API key to get started. You can also set the GOOGLE_API_KEY "
+            "environment variable before launching the app."
+        )
         st.session_state.api_key_valid = False
         st.session_state.client = None
     elif st.session_state.api_key_valid and st.session_state.client:
