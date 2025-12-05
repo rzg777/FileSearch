@@ -12,6 +12,7 @@ import streamlit as st
 import pandas as pd
 import time
 from datetime import datetime
+import os
 
 # Google GenAI SDK imports
 # google.genai is the main client library for Gemini API
@@ -408,18 +409,28 @@ with st.sidebar:
     
     # API Key Input
     st.subheader("🔑 Authentication")
-    api_key = st.text_input(
-        "Gemini API Key",
-        type="password",
-        help="Enter your Gemini API key. Get one at https://aistudio.google.com/apikey",
-        placeholder="Enter your API key..."
-    )
+    
+    api_key = None
+    
+    # Check if API key is in secrets
+    if "GEMINI_API_KEY" in st.secrets:
+        api_key = st.secrets["GEMINI_API_KEY"]
+        st.success("✅ API Key configured via Secrets")
+    else:
+        api_key = st.text_input(
+            "Gemini API Key",
+            type="password",
+            help="Enter your Gemini API key. Get one at https://aistudio.google.com/apikey",
+            placeholder="Enter your API key..."
+        )
     
     if api_key:
         if not st.session_state.api_key_valid or st.session_state.client is None:
             with st.spinner("Validating API key..."):
                 if initialize_client(api_key):
-                    st.success("✅ Connected to Gemini API")
+                    # Only show success message if we just initialized and it wasn't from secrets (to avoid double success messages)
+                    if "GEMINI_API_KEY" not in st.secrets:
+                        st.success("✅ Connected to Gemini API")
     else:
         st.info("👆 Enter your API key to get started")
         st.session_state.api_key_valid = False
@@ -690,27 +701,51 @@ with tab2:
         # Create DataFrame for display
         file_data = []
         for f in files:
-            file_data.append({
-                "Name": getattr(f, 'display_name', f.name),
-                "Size": getattr(f, 'size_bytes', 'N/A'),
-                "Status": getattr(f, 'state', types.FileState.UNSPECIFIED).name if hasattr(f, 'state') else 'Unknown',
-                "Created": getattr(f, 'create_time', 'N/A'),
-                "Resource Name": f.name
-            })
+            try:
+                # Defensive extraction of attributes
+                name = getattr(f, 'display_name', None) or getattr(f, 'name', 'Unknown')
+                size = getattr(f, 'size_bytes', 0)
+                
+                # Handle status/state carefully
+                status = "Unknown"
+                if hasattr(f, 'state'):
+                    state_val = f.state
+                    if hasattr(state_val, 'name'):
+                        status = state_val.name
+                    else:
+                        status = str(state_val)
+                
+                created = getattr(f, 'create_time', None)
+                resource_name = getattr(f, 'name', '')
+                
+                file_data.append({
+                    "Name": name,
+                    "Size": size,
+                    "Status": status,
+                    "Created": created,
+                    "Resource Name": resource_name
+                })
+            except Exception as e:
+                # Log error but don't crash the app
+                print(f"Error processing file object: {e}")
+                continue
         
-        df = pd.DataFrame(file_data)
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Name": st.column_config.TextColumn("📄 Name", width="medium"),
-                "Size": st.column_config.NumberColumn("📊 Size (bytes)", width="small"),
-                "Status": st.column_config.TextColumn("🔄 Status", width="small"),
-                "Created": st.column_config.DatetimeColumn("📅 Created", width="medium"),
-                "Resource Name": st.column_config.TextColumn("🔗 Resource Name", width="large"),
-            }
-        )
+        if file_data:
+            df = pd.DataFrame(file_data)
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Name": st.column_config.TextColumn("📄 Name", width="medium"),
+                    "Size": st.column_config.NumberColumn("📊 Size (bytes)", width="small"),
+                    "Status": st.column_config.TextColumn("🔄 Status", width="small"),
+                    "Created": st.column_config.DatetimeColumn("📅 Created", width="medium"),
+                    "Resource Name": st.column_config.TextColumn("🔗 Resource Name", width="large"),
+                }
+            )
+        else:
+            st.info("📭 No valid files found in this store.")
     else:
         st.info("📭 No files in this store yet. Upload your first file above!")
 
@@ -801,21 +836,10 @@ with tab3:
                             <em>"{citation.get('text', 'No snippet available')[:200]}..."</em>
                         </div>
                         """, unsafe_allow_html=True)
-            else:
-                st.caption("ℹ️ No specific citations found for this response.")
-        
-        # Add assistant message to history
-        st.session_state.chat_history.append({
-            "role": "assistant",
-            "content": response_text,
-            "citations": citations
-        })
-        
-        st.rerun()
-
-
-# =============================================================================
-# FOOTER
-# =============================================================================
-st.markdown("---")
-st.caption("💡 **Tip:** Use descriptive store names and metadata to organize your documents effectively.")
+            
+            # Add assistant message to history
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": response_text,
+                "citations": citations
+            })

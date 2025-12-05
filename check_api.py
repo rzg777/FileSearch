@@ -4,7 +4,8 @@ from google import genai
 
 print("Inspecting google.genai SDK...")
 try:
-    client = genai.Client(api_key="TEST_KEY") # We just want to inspect the object structure
+    api_key = os.getenv("GEMINI_API_KEY", "TEST_KEY")
+    client = genai.Client(api_key=api_key) # We just want to inspect the object structure
     print("client.file_search_stores attributes:", dir(client.file_search_stores))
     
     if hasattr(client.file_search_stores, 'files'):
