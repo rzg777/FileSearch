@@ -222,23 +222,35 @@ def delete_store(store_name: str):
 def list_files(store_name: str):
     """
     List all files in a File Search Store.
-    
+
     Uses client.file_search_stores.files.list() to get files in a store.
-    
+
     Args:
         store_name: The resource name of the store
-        
+
     Returns:
-        List of file objects
+        List of file objects if successful, or None if retrieval failed.
     """
+    client = st.session_state.get("client")
+    if not client:
+        st.warning("⚠️ Please configure an API key to load files.")
+        return None
+
+    if not store_name:
+        st.warning("⚠️ Please select a store to view its files.")
+        return None
+
     try:
-        client = st.session_state.client
-        files = list(client.files.list())
-        # Filter files that belong to this store if possible
+        # List files scoped to the specific File Search Store
+        files = list(
+            client.file_search_stores.files.list(
+                file_search_store=store_name
+            )
+        )
         return files
     except Exception as e:
         st.error(f"❌ Error listing files: {e}")
-        return []
+        return None
 
 
 def upload_file_to_store(store_name: str, uploaded_file, metadata: dict, chunking_config: dict = None):
@@ -677,16 +689,19 @@ with tab2:
                         st.warning(f"⚠️ File status: {final_status}")
     
     st.markdown("---")
-    
+
     # Files table
     st.subheader("📋 Files in This Store")
-    
+
     if st.button("🔄 Refresh Files", help="Reload the list of files"):
         st.rerun()
-    
-    files = list_files(store.name)
-    
-    if files:
+
+    with st.spinner("Loading files..."):
+        files = list_files(store.name)
+
+    if files is None:
+        st.warning("⚠️ Unable to load files for this store right now. Please try refreshing.")
+    elif files:
         # Create DataFrame for display
         file_data = []
         for f in files:
@@ -697,7 +712,7 @@ with tab2:
                 "Created": getattr(f, 'create_time', 'N/A'),
                 "Resource Name": f.name
             })
-        
+
         df = pd.DataFrame(file_data)
         st.dataframe(
             df,
@@ -712,7 +727,10 @@ with tab2:
             }
         )
     else:
-        st.info("📭 No files in this store yet. Upload your first file above!")
+        st.info(
+            f"📭 No files found in **{getattr(store, 'display_name', store.name)}**. "
+            "Upload your first file above to get started!"
+        )
 
 
 # =============================================================================
